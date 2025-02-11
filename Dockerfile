@@ -18,7 +18,7 @@ COPY . /app
 
 # 3) Provide default environment variables to point to Ollama (running elsewhere)
 #    Adjust the OLLAMA_URL to match your actual Ollama container or service.
-ENV OLLAMA_BASE_URL="http://localhost:11434/"
+ENV OLLAMA_BASE_URL="http://host.docker.internal:11434/"
 
 # 4) Expose the port that LangGraph dev server uses (default: 2024)
 EXPOSE 2024

@@ -162,3 +162,51 @@ def perplexity_search(query: str, perplexity_search_loop_count: int) -> Dict[str
         })
     
     return {"results": results}
+
+def google_search(query: str, google_search_loop_count: int) -> Dict[str, Any]:
+    """Search the web using Google Custom Search API.
+    
+    Args:
+        query (str): The search query to execute.
+        google_search_loop_count (int): The loop step for Google search (starts at 0).
+  
+    Returns:
+        dict: Search response containing:
+            - results (list): List of search result dictionaries, each containing:
+                - title (str): Title of the search result.
+                - url (str): URL of the search result.
+                - content (str): Snippet/summary of the content.
+                - raw_content (str): Full content of the page if available.
+    """
+    api_key = os.getenv('GOOGLE_API_KEY')
+    cx = os.getenv('GOOGLE_PSE')
+    
+    if not api_key or not cx:
+        raise ValueError("Missing GOOGLE_API_KEY or GOOGLE_CSE_ID environment variable")
+    
+    search_url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "q": query,
+        "key": api_key,
+        "cx": cx,
+        "num": 5
+    }
+    
+    response = requests.get(search_url, params=params)
+    
+    if response.status_code == 403:
+        raise PermissionError("API request failed with 403 Forbidden. Check API key, CSE ID, and quota.")
+    
+    response.raise_for_status()
+    data = response.json()
+    
+    results = []
+    for i, item in enumerate(data.get("items", []), start=1):
+        results.append({
+            "title": item.get("title", f"Google Search {google_search_loop_count + 1}, Result {i}"),
+            "url": item.get("link"),
+            "content": item.get("snippet", "Snippet not available"),
+            "raw_content": None
+        })
+    
+    return {"results": results}
