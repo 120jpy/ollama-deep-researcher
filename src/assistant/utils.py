@@ -3,6 +3,10 @@ import requests
 from typing import Dict, Any, List, Optional
 from langsmith import traceable
 from tavily import TavilyClient
+import re
+import fitz  # PyMuPDF
+from selectolax.parser import HTMLParser
+from urllib.parse import urljoin
 
 def deduplicate_and_format_sources(search_response, max_tokens_per_source, include_raw_content=False):
     """
@@ -163,6 +167,71 @@ def perplexity_search(query: str, perplexity_search_loop_count: int) -> Dict[str
     
     return {"results": results}
 
+def clean_text(text: str) -> str:
+    """Remove unnecessary whitespace, newlines, and tabs from text."""
+    text = re.sub(r'\s+', ' ', text)  # 連続する空白・改行・タブを1つのスペースに置換
+    return text.strip()
+
+def fetch_full_content(url: str) -> str:
+    """Fetches and cleans readable text from a webpage, including PDFs if available."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        tree = HTMLParser(response.text)
+
+        # Extract text from common tags
+        main_tags = ["article", "main", "body"]
+        full_text = None
+        for tag in main_tags:
+            node = tree.css_first(tag)
+            if node:
+                full_text = clean_text(node.text(separator=" "))[:2000]  # 最大2000文字
+                break
+        if not full_text:
+            full_text = "Content extraction failed."
+
+        # Find PDF links
+        pdf_texts = []
+        for node in tree.css("a[href]"):
+            href = node.attributes.get("href", "")
+            if href.endswith(".pdf"):
+                pdf_url = urljoin(url, href)  # 絶対URLに変換
+                pdf_text = clean_text(fetch_pdf_text(pdf_url)[:1000])
+                if pdf_text:
+                    pdf_texts.append(f"[PDF] {pdf_url}: {pdf_text}")
+
+        # Merge text content
+        content = full_text
+        if pdf_texts:
+            content += "\n\n" + "\n".join(pdf_texts)
+
+        return content
+
+    except Exception as e:
+        return f"Error fetching content: {str(e)}"
+
+def fetch_pdf_text(pdf_url: str) -> str:
+    """Downloads and extracts cleaned text from a PDF file."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(pdf_url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        with open("/tmp/temp.pdf", "wb") as f:
+            f.write(response.content)
+
+        # Extract text using PyMuPDF
+        doc = fitz.open("/tmp/temp.pdf")
+        text = "\n".join([page.get_text("text") for page in doc])
+        doc.close()
+
+        return clean_text(text[:5000])
+    
+    except Exception as e:
+        return f"Error extracting PDF: {str(e)}"
+
 def google_search(query: str, google_search_loop_count: int) -> Dict[str, Any]:
     """Search the web using Google Custom Search API.
     
@@ -202,11 +271,16 @@ def google_search(query: str, google_search_loop_count: int) -> Dict[str, Any]:
     
     results = []
     for i, item in enumerate(data.get("items", []), start=1):
+        page_url = item.get("link")
+        page_content = fetch_full_content(page_url)
+
         results.append({
             "title": item.get("title", f"Google Search {google_search_loop_count + 1}, Result {i}"),
-            "url": item.get("link"),
-            "content": item.get("snippet", "Snippet not available"),
-            "raw_content": None
+            "url": page_url,
+            "content": page_content
         })
+
+    # Sort results by content length (descending order)
+    results.sort(key=lambda x: len(x["content"]), reverse=True)
     
     return {"results": results}
