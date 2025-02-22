@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_ollama import ChatOllama
 from langgraph.graph import START, END, StateGraph
+from langgraph.types import interrupt
 
 from assistant.configuration import Configuration, SearchAPI
 from assistant.utils import deduplicate_and_format_sources, tavily_search, format_sources, perplexity_search, google_search
@@ -30,6 +31,42 @@ def generate_query(state: SummaryState, config: RunnableConfig):
 
     return {"search_query": query['query']}
 
+def user_question(state: SummaryState, config: RunnableConfig):
+    # Configure
+    configurable = Configuration.from_runnable_config(config)
+    llm = ChatOllama(
+        base_url=configurable.ollama_base_url,
+        model=configurable.local_llm,
+        temperature=0.7,
+        format="json"  # JSON形式の出力を期待
+    )
+
+    # LLM に具体的な質問を生成させるプロンプト
+    prompt = (f"You are a research assistant helping a user gather more information on a topic."
+              f"The topic is: '{state.research_topic}'."
+              f"Generate a meaningful follow-up question to clarify or expand the research topic."
+              f"Ensure that your question helps gather useful details."
+              f"Return your response as a JSON object with a single key 'question'.")
+
+    # LLM に質問を生成させる
+    result = llm.invoke([SystemMessage(content=prompt)])
+    
+    try:
+        response_json = json.loads(result.content)
+        generated_question = response_json.get('question', "Can you provide more details on your research topic?")
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"Error parsing LLM response: {e}")
+        generated_question = "Can you provide more details on your research topic?"
+
+    # ユーザーからの回答を入力として受け付ける
+    user_response = interrupt(f"{generated_question}")
+
+    # 状態に保存
+    state.info.append(user_response)
+
+    return {"info": user_response}
+
+
 def web_research(state: SummaryState, config: RunnableConfig):
     """ Gather information from the web """
 
@@ -52,7 +89,7 @@ def web_research(state: SummaryState, config: RunnableConfig):
         search_results = perplexity_search(state.search_query, state.research_loop_count)
         search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=1000, include_raw_content=False)
     elif search_api == "googlesearch":
-        search_results = google_search(state.search_query, state.research_loop_count)
+        search_results = google_search(state.search_query, state.research_loop_count,config)
         search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=1000, include_raw_content=False)
     else:
         raise ValueError(f"Unsupported search API: {configurable.search_api}")
@@ -140,21 +177,42 @@ def route_research(state: SummaryState, config: RunnableConfig) -> Literal["fina
         return "web_research"
     else:
         return "finalize_summary"
+    
+def pre_web_research(state: SummaryState, config: RunnableConfig):
+    return web_research(state,config)
 
-# Add nodes and edges
+def pre_summarize_sources(state: SummaryState, config: RunnableConfig):
+    return summarize_sources(state,config)
+
+
 builder = StateGraph(SummaryState, input=SummaryStateInput, output=SummaryStateOutput, config_schema=Configuration)
 builder.add_node("generate_query", generate_query)
+builder.add_node("pre_web_research", pre_web_research)
+builder.add_node("pre_summarize_sources", pre_summarize_sources)
+builder.add_node("user_question", user_question)
 builder.add_node("web_research", web_research)
 builder.add_node("summarize_sources", summarize_sources)
 builder.add_node("reflect_on_summary", reflect_on_summary)
 builder.add_node("finalize_summary", finalize_summary)
 
-# Add edges
 builder.add_edge(START, "generate_query")
-builder.add_edge("generate_query", "web_research")
+builder.add_edge("generate_query", "pre_web_research")
+builder.add_edge("pre_web_research", "pre_summarize_sources")
+builder.add_edge("pre_summarize_sources", "user_question")
+builder.add_edge("user_question", "web_research")
 builder.add_edge("web_research", "summarize_sources")
 builder.add_edge("summarize_sources", "reflect_on_summary")
 builder.add_conditional_edges("reflect_on_summary", route_research)
 builder.add_edge("finalize_summary", END)
+
+"""
+builder.add_edge(START, "generate_query")
+builder.add_edge("generate_query", "user_question")
+builder.add_edge("user_question", "web_research")
+builder.add_edge("web_research", "summarize_sources")
+builder.add_edge("summarize_sources", "reflect_on_summary")
+builder.add_conditional_edges("reflect_on_summary", route_research)
+builder.add_edge("finalize_summary", END)
+"""
 
 graph = builder.compile()

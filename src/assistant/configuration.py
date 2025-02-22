@@ -17,12 +17,10 @@ class Configuration:
     """The configurable fields for the research assistant."""
     max_web_research_loops: int = 3
     local_llm: str = "phi4:14b-q4_K_M"
+    pdf_llm: str = "Qwen2.5-VL-7B-Instruct-Q4_K_M:latest"
     search_api: SearchAPI = SearchAPI.GOOGLE  # Default to TAVILY
     fetch_full_page: bool = True  # Default to False
     ollama_base_url: str = "http://localhost:11434/"
-
-    print(os.getenv('GOOGLE_API_KEY'))
-    print(os.getenv('GOOGLE_PSE'))
 
     @classmethod
     def from_runnable_config(

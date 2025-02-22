@@ -4,9 +4,16 @@ from typing import Dict, Any, List, Optional
 from langsmith import traceable
 from tavily import TavilyClient
 import re
+from tabulate import tabulate  # 表を見やすく表示するため
 import fitz  # PyMuPDF
+import pdfplumber
+import pandas as pd
 from selectolax.parser import HTMLParser
 from urllib.parse import urljoin
+from langchain_core.runnables import RunnableConfig
+from assistant.configuration import Configuration
+from langchain_core.messages import SystemMessage
+from langchain_ollama import ChatOllama
 
 def deduplicate_and_format_sources(search_response, max_tokens_per_source, include_raw_content=False):
     """
@@ -172,10 +179,17 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text)  # 連続する空白・改行・タブを1つのスペースに置換
     return text.strip()
 
-def fetch_full_content(url: str) -> str:
-    """Fetches and cleans readable text from a webpage, including PDFs if available."""
+
+def fetch_full_content(url: str, config: RunnableConfig) -> str:
+    """Fetches and cleans readable text from a webpage, or summarizes a PDF if the URL points to one."""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
+        
+        # PDF の場合、直接要約
+        if url.lower().endswith(".pdf"):
+            return fetch_pdf_text(url, config)
+
+        # HTMLページの処理
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
 
@@ -187,33 +201,90 @@ def fetch_full_content(url: str) -> str:
         for tag in main_tags:
             node = tree.css_first(tag)
             if node:
-                full_text = clean_text(node.text(separator=" "))[:2000]  # 最大2000文字
+                full_text = clean_text(node.text(separator=" "))
                 break
         if not full_text:
             full_text = "Content extraction failed."
 
         # Find PDF links
-        pdf_texts = []
+        pdf_summaries = []
         for node in tree.css("a[href]"):
             href = node.attributes.get("href", "")
-            if href.endswith(".pdf"):
+            if href.lower().endswith(".pdf"):
                 pdf_url = urljoin(url, href)  # 絶対URLに変換
-                pdf_text = clean_text(fetch_pdf_text(pdf_url)[:1000])
-                if pdf_text:
-                    pdf_texts.append(f"[PDF] {pdf_url}: {pdf_text}")
+                pdf_summary = fetch_pdf_text(pdf_url, config)  # PDF を要約
+                if pdf_summary:
+                    pdf_summaries.append(f"[PDF] {pdf_url}: {pdf_summary}")
 
         # Merge text content
         content = full_text
-        if pdf_texts:
-            content += "\n\n" + "\n".join(pdf_texts)
+        if pdf_summaries:
+            content += "\n\n" + "\n".join(pdf_summaries)
 
         return content
 
     except Exception as e:
         return f"Error fetching content: {str(e)}"
 
-def fetch_pdf_text(pdf_url: str) -> str:
-    """Downloads and extracts cleaned text from a PDF file."""
+def clean_table(df):
+    """ DataFrame の空白を削除し、None を空文字に変換 """
+    df = df.map(lambda x: x.strip() if isinstance(x, str) else ("" if x is None else x))
+    # セル内の余分な空白を削除
+    df.replace(r"\s+", " ", regex=True, inplace=True)
+    # 空白のみのセルを None に変換
+    df.replace("", None, inplace=True)
+    # 空の列・行を削除
+    df.dropna(axis=1, how="all", inplace=True)  # すべて空の列を削除
+    df.dropna(axis=0, how="all", inplace=True)  # すべて空の行を削除
+    return df
+
+def extract_text_and_tables(pdf_path):
+
+    # 表の抽出設定
+    TABLE_SETTINGS = {
+        "vertical_strategy": "lines",
+        "horizontal_strategy": "lines",
+        "intersection_x_tolerance": 5,
+        "intersection_y_tolerance": 5
+    }
+    extracted_data = []
+    
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            elements = []
+            
+            # 文章を抽出
+            text = page.extract_text()
+            if text:
+                elements.append(("text", text.strip()))
+            
+            # 表を抽出（設定適用）
+            tables = page.extract_tables(TABLE_SETTINGS)
+            for table in tables:
+                df = pd.DataFrame(table)
+                # 空白処理
+                df = clean_table(df)
+                elements.append(("table", df))
+            
+            extracted_data.append(elements)
+    
+    return extracted_data
+
+def format_output(data):
+    ret_txt = ""
+    for page_num, elements in enumerate(data, start=1):
+        ret_txt += f"\n--- Page {page_num} ---\n"
+        for elem_type, content in elements:
+            if elem_type == "text":
+                ret_txt += content
+            elif elem_type == "table":
+                ret_txt += "\n[Table]\n"
+                ret_txt += tabulate(content, headers="keys", tablefmt="grid")  # 表を見やすく整形
+    return ret_txt
+
+
+def fetch_pdf_text(pdf_url: str,config: RunnableConfig) -> str:
+    """Downloads, extracts text from a PDF file, and summarizes it using Ollama."""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(pdf_url, headers=headers, timeout=10)
@@ -223,16 +294,43 @@ def fetch_pdf_text(pdf_url: str) -> str:
             f.write(response.content)
 
         # Extract text using PyMuPDF
-        doc = fitz.open("/tmp/temp.pdf")
-        text = "\n".join([page.get_text("text") for page in doc])
-        doc.close()
+        pdfdata = extract_text_and_tables("/tmp/temp.pdf")
+        text = format_output(pdfdata)
+        if not text.strip():
+            return ""
 
-        return clean_text(text[:5000])
-    
+        # Ollama で要約
+        configurable = Configuration.from_runnable_config(config)
+        num_ctx = 4092
+        llm = ChatOllama(
+            base_url=configurable.ollama_base_url,
+            model=configurable.pdf_llm,
+            temperature=0.7,
+            num_ctx=num_ctx,
+            format="json"  # JSON 形式の出力を期待
+        )
+
+        prompt = (f"You are an AI assistant that summarizes research papers and articles.\n"
+                  f"Here is the extracted text from a PDF:\n"
+                  f"```\n{text}\n```"
+                  f"Summarize the key points in a structured format."
+                  f"Return your response as a JSON object with a single key 'summary'.")
+
+        # LLM に要約させる
+        result = llm.invoke([SystemMessage(content=prompt)])
+
+        # 結果の処理
+        try:
+            summary = result["summary"]
+        except (KeyError, TypeError):
+            summary = ""
+
+        return summary
+
     except Exception as e:
-        return f"Error extracting PDF: {str(e)}"
+        return ""
 
-def google_search(query: str, google_search_loop_count: int) -> Dict[str, Any]:
+def google_search(query: str, google_search_loop_count: int,config: RunnableConfig) -> Dict[str, Any]:
     """Search the web using Google Custom Search API.
     
     Args:
@@ -258,21 +356,25 @@ def google_search(query: str, google_search_loop_count: int) -> Dict[str, Any]:
         "q": query,
         "key": api_key,
         "cx": cx,
-        "num": 5
+        "num": 10
     }
     
-    response = requests.get(search_url, params=params)
-    
-    if response.status_code == 403:
-        raise PermissionError("API request failed with 403 Forbidden. Check API key, CSE ID, and quota.")
+    for i in range(2):
+        response = requests.get(search_url, params=params)
+        
+        if response.status_code == 403:
+            raise PermissionError("API request failed with 403 Forbidden. Check API key, CSE ID, and quota.")
+        else :
+            break
     
     response.raise_for_status()
     data = response.json()
+    page_content = ""
     
     results = []
     for i, item in enumerate(data.get("items", []), start=1):
         page_url = item.get("link")
-        page_content = fetch_full_content(page_url)
+        page_content += fetch_full_content(page_url,config)
 
         results.append({
             "title": item.get("title", f"Google Search {google_search_loop_count + 1}, Result {i}"),
