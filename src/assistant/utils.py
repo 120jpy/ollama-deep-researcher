@@ -5,7 +5,6 @@ from langsmith import traceable
 from tavily import TavilyClient
 import re
 from tabulate import tabulate  # 表を見やすく表示するため
-import fitz  # PyMuPDF
 import pdfplumber
 import pandas as pd
 from selectolax.parser import HTMLParser
@@ -14,6 +13,7 @@ from langchain_core.runnables import RunnableConfig
 from assistant.configuration import Configuration
 from langchain_core.messages import SystemMessage
 from langchain_ollama import ChatOllama
+from trafilatura import extract
 
 def deduplicate_and_format_sources(search_response, max_tokens_per_source, include_raw_content=False):
     """
@@ -179,12 +179,11 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text)  # 連続する空白・改行・タブを1つのスペースに置換
     return text.strip()
 
-
 def fetch_full_content(url: str, config: RunnableConfig) -> str:
     """Fetches and cleans readable text from a webpage, or summarizes a PDF if the URL points to one."""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        
+
         # PDF の場合、直接要約
         if url.lower().endswith(".pdf"):
             return fetch_pdf_text(url, config)
@@ -193,20 +192,12 @@ def fetch_full_content(url: str, config: RunnableConfig) -> str:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
 
+        # HTML のテキストを抽出（タグ・CSS 除去）
+        full_text = extract(response.text, include_links=False)  # trafilatura を使用
+        full_text = full_text.strip() if full_text else "Content extraction failed."
+
+        # HTML をパースして PDF リンクを抽出
         tree = HTMLParser(response.text)
-
-        # Extract text from common tags
-        main_tags = ["article", "main", "body"]
-        full_text = None
-        for tag in main_tags:
-            node = tree.css_first(tag)
-            if node:
-                full_text = clean_text(node.text(separator=" "))
-                break
-        if not full_text:
-            full_text = "Content extraction failed."
-
-        # Find PDF links
         pdf_summaries = []
         for node in tree.css("a[href]"):
             href = node.attributes.get("href", "")
@@ -216,15 +207,16 @@ def fetch_full_content(url: str, config: RunnableConfig) -> str:
                 if pdf_summary:
                     pdf_summaries.append(f"[PDF] {pdf_url}: {pdf_summary}")
 
-        # Merge text content
-        content = full_text
+        # テキストと PDF 要約を結合
         if pdf_summaries:
-            content += "\n\n" + "\n".join(pdf_summaries)
+            full_text += "\n\n" + "\n".join(pdf_summaries)
 
-        return content
+        return full_text
 
+    except requests.RequestException as e:
+        return f"Error fetching content (RequestException): {str(e)}"
     except Exception as e:
-        return f"Error fetching content: {str(e)}"
+        return f"Error fetching content (General): {str(e)}"
 
 def clean_table(df):
     """ DataFrame の空白を削除し、None を空文字に変換 """
@@ -298,36 +290,9 @@ def fetch_pdf_text(pdf_url: str,config: RunnableConfig) -> str:
         text = format_output(pdfdata)
         if not text.strip():
             return ""
-
-        # Ollama で要約
-        configurable = Configuration.from_runnable_config(config)
-        num_ctx = 4092
-        llm = ChatOllama(
-            base_url=configurable.ollama_base_url,
-            model=configurable.pdf_llm,
-            temperature=0.7,
-            num_ctx=num_ctx,
-            format="json"  # JSON 形式の出力を期待
-        )
-
-        prompt = (f"You are an AI assistant that summarizes research papers and articles.\n"
-                  f"Here is the extracted text from a PDF:\n"
-                  f"```\n{text}\n```"
-                  f"Summarize the key points in a structured format."
-                  f"Return your response as a JSON object with a single key 'summary'.")
-
-        # LLM に要約させる
-        result = llm.invoke([SystemMessage(content=prompt)])
-
-        # 結果の処理
-        try:
-            summary = result["summary"]
-        except (KeyError, TypeError):
-            summary = ""
-
-        return summary
-
-    except Exception as e:
+        
+        return text
+    except:
         return ""
 
 def google_search(query: str, google_search_loop_count: int,config: RunnableConfig) -> Dict[str, Any]:
@@ -356,14 +321,14 @@ def google_search(query: str, google_search_loop_count: int,config: RunnableConf
         "q": query,
         "key": api_key,
         "cx": cx,
-        "num": 10
+        "num": 5
     }
     
     for i in range(2):
         response = requests.get(search_url, params=params)
         
         if response.status_code == 403:
-            raise PermissionError("API request failed with 403 Forbidden. Check API key, CSE ID, and quota.")
+            pass
         else :
             break
     
