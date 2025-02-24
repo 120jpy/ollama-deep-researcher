@@ -1,10 +1,9 @@
 import os
 from dataclasses import dataclass, fields
 from typing import Any, Optional
-
+import logging
 from langchain_core.runnables import RunnableConfig
 from dataclasses import dataclass
-
 from enum import Enum
 
 class SearchAPI(Enum):
@@ -35,4 +34,4 @@ class Configuration:
             for f in fields(cls)
             if f.init
         }
-        return cls(**{k: v for k, v in values.items() if v})
+        return cls(**{k: v for k, v in values.items() if v is not None})

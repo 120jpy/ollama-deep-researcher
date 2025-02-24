@@ -19,7 +19,7 @@ logger.setLevel(logging.DEBUG)  # Set the logging level
 # Nodes
 def generate_query(state: SummaryState, config: RunnableConfig):
     """ Generate a query for web search """
-    
+
     configurable = Configuration.from_runnable_config(config)
 
     logger.info("max_web_research_loops : " + str(configurable.max_web_research_loops))
