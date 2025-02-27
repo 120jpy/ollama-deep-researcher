@@ -22,13 +22,6 @@ def generate_query(state: SummaryState, config: RunnableConfig):
 
     configurable = Configuration.from_runnable_config(config)
 
-    logger.info("max_web_research_loops : " + str(configurable.max_web_research_loops))
-    logger.info("local_llm : " + str(configurable.local_llm))
-    logger.info("search_api : " + str(configurable.search_api))
-    logger.info("fetch_full_page : " + str(configurable.fetch_full_page))
-    logger.info("user_question : " + str(configurable.user_question))
-    logger.info("ollama_base_url : " + str(configurable.ollama_base_url))
-
     # Format the prompt
     query_writer_instructions_formatted = query_writer_instructions.format(research_topic=state.research_topic)
 
@@ -55,14 +48,40 @@ def user_question(state: SummaryState, config: RunnableConfig):
             format="json"  # JSON形式の出力を期待
         )
 
-        # LLM に具体的な質問を生成させるプロンプト
-        prompt = (f"You are a research assistant helping a user gather more information on a topic."
-                f"The topic is: '{state.research_topic}'."
-                f"<Existing Summary> \n {state.running_summary} \n <Existing Summary>\n\n"
-                f"Generate a meaningful follow-up question to clarify or expand the research topic."
-                f"Ensure that your question helps gather useful details."
-                f"Return your response as a JSON object with a single key 'question'.")
+        # English
+        #prompt = (
+        #    f"You are a research assistant helping a user gather more information on the topic: '{state.research_topic}'.\n\n"
+        #    "Your task is to generate a meaningful follow-up question that will clarify or expand upon the research topic.\n"
+        #    "Focus primarily on the research topic itself rather than relying too much on existing summaries.\n\n"
+        #    "<Reference Summary (for context, not strict guidance)>\n"
+        #    f"{state.running_summary}\n"
+        #    "<End of Reference Summary>\n\n"
+        #    "Ensure your question explores new perspectives, deepens understanding, or introduces critical subtopics.\n"
+        #    "Consider angles such as:\n"
+        #    "- What impact does [specific aspect] have on the overall topic?\n"
+        #    "- How can we further investigate [particular element] within this context?\n"
+        #    "- In what ways could [related concept] influence our understanding of this topic?\n\n"
+        #    "Generate a single well-structured follow-up question that enhances the research direction.\n"
+        #    "Return your response as a JSON object with a single key 'question'."
+        #)
 
+        prompt = (
+                    f"あなたはリサーチアシスタントです。ユーザーが以下の研究テーマについてより多くの情報を収集できるよう支援してください。\n\n"
+                    f"【研究テーマ】\n{state.research_topic}\n\n"
+                    "あなたの役割は、この研究テーマに関して有益なフォローアップ質問を考えることです。\n"
+                    "既存の要約は参考情報として提供しますが、内容に過度に依存せず、新しい視点を取り入れてください。\n\n"
+                    "【参考要約（あくまで参考として）】\n"
+                    f"{state.running_summary}\n"
+                    "【参考要約ここまで】\n\n"
+                    "研究を深めるために、以下のような観点から質問を考えてください。\n"
+                    "- 特定の要素が全体のテーマにどのような影響を与えるか？\n"
+                    "- このテーマに関連する新たな視点や課題はあるか？\n"
+                    "- さらなる調査を進めるために、どのようなデータや分析が必要か？\n\n"
+                    "研究の方向性を発展させる、具体的で洞察に富んだフォローアップ質問を1つ生成してください。\n"
+                    "出力は、以下のフォーマットでJSONオブジェクトとして返してください。\n\n"
+                    '{"question": "ここに質問を記述"}'
+                )
+        
         # LLM に質問を生成させる
         result = llm.invoke([SystemMessage(content=prompt)])
         
@@ -75,6 +94,8 @@ def user_question(state: SummaryState, config: RunnableConfig):
 
         # ユーザーからの回答を入力として受け付ける
         user_response = interrupt(f"{generated_question}")
+        state.ollama_question = generated_question
+        state.user_input = user_response
 
     return {"info": user_response}
 
@@ -128,28 +149,60 @@ def sumarize_ollama_split(state: SummaryState, config: RunnableConfig):
     for text in chunks:
         # Build the human message
         if existing_summary:
-            if state.info :
+            if state.user_input :
                 human_message_content = (
-                    f"<User Input> \n {state.research_topic}  \n {state.info} \n <User Input>\n\n"
-                    f"<Existing Summary> \n {existing_summary} \n <Existing Summary>\n\n"
-                    f"<New Search Results> \n {text} \n <New Search Results>"
+                    f"<Research Topic>\n"
+                    f"{state.research_topic}\n"
+                    f"<Research Topic>\n\n"
+                    f"<Supplementary Information>\n"
+                    f"User Question: {state.ollama_question}\n"
+                    f"User Answer: {state.user_input}\n"
+                    f"<Supplementary Information>\n\n"
+                    f"<Existing Summary>\n"
+                    f"{existing_summary}\n"
+                    f"<Existing Summary>\n\n"
+                    f"<New Search Results>\n"
+                    f"{text}\n"
+                    f"<New Search Results>\n\n"
+                    f"Generate a comprehensive and updated summary based primarily on the research topic, while also considering the supplementary information, existing summary, and latest search results."
                 )
             else:
                 human_message_content = (
-                    f"<User Input> \n {state.research_topic} \n <User Input>\n\n"
-                    f"<Existing Summary> \n {existing_summary} \n <Existing Summary>\n\n"
-                    f"<New Search Results> \n {text} \n <New Search Results>"
+                    f"<Research Topic>\n"
+                    f"{state.research_topic}\n"
+                    f"<Research Topic>\n\n"
+                    f"<Existing Summary>\n"
+                    f"{existing_summary}\n"
+                    f"<Existing Summary>\n\n"
+                    f"<New Search Results>\n"
+                    f"{text}\n"
+                    f"<New Search Results>\n\n"
+                    f"Generate a comprehensive and updated summary based on the research topic, existing summary, and the latest search results."
                 )
         else:
-            if state.info :
+            if state.user_input :
                 human_message_content = (
-                    f"<User Input> \n {state.research_topic} \n {state.info} \n <User Input>\n\n"
-                    f"<Search Results> \n {text} \n <Search Results>"
+                    f"<Research Topic>\n"
+                    f"{state.research_topic}\n"
+                    f"<Research Topic>\n\n"
+                    f"<Supplementary Information>\n"
+                    f"User Question: {state.ollama_question}\n"
+                    f"User Answer: {state.user_input}\n"
+                    f"<Supplementary Information>\n\n"
+                    f"<New Search Results>\n"
+                    f"{text}\n"
+                    f"<New Search Results>\n\n"
+                    f"Generate a comprehensive and updated summary based primarily on the research topic, while also considering the supplementary information, latest search results."
                 )
             else:
                 human_message_content = (
-                    f"<User Input> \n {state.research_topic} \n <User Input>\n\n"
-                    f"<Search Results> \n {text} \n <Search Results>"
+                    f"<Research Topic>\n"
+                    f"{state.research_topic}\n"
+                    f"<Research Topic>\n\n"
+                    f"<New Search Results>\n"
+                    f"{text}\n"
+                    f"<New Search Results>\n\n"
+                    f"Generate a comprehensive and updated summary based on the research topic, the latest search results."
                 )
 
         # Run the LLM

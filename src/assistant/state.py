@@ -12,10 +12,13 @@ class SummaryState:
     sources_gathered: Annotated[list, operator.add] = field(default_factory=list) 
     research_loop_count: int = field(default=0) # Research loop count
     running_summary: str = field(default=None) # Final report
+    ollama_question: str = field(default=None) # 
+    user_input: str = field(default=None) # 
 
 @dataclass(kw_only=True)
 class SummaryStateInput:
-    research_topic: str = field(default=None) # Report topic     
+    research_topic: str = field(default=None) # Report topic
+    user_input: str = field(default=None) 
 
 @dataclass(kw_only=True)
 class SummaryStateOutput:
